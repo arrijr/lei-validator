@@ -4,3 +4,6 @@ node_modules/
 .env*.local
 .vercel
 *.tsbuildinfo
+RAPIDAPI_LISTING.md
+CLAUDE_CODE_PROMPT.md
+KICKOFF.md
