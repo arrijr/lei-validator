@@ -4,7 +4,12 @@ export const config = {
   matcher: ["/api/v1/:path*"],
 };
 
+const PUBLIC_PATHS = ["/api/v1/health"];
+
 export function middleware(req: NextRequest) {
+  if (PUBLIC_PATHS.includes(req.nextUrl.pathname)) {
+    return NextResponse.next();
+  }
   const expected = process.env.RAPIDAPI_PROXY_SECRET;
   if (!expected) {
     return NextResponse.json(

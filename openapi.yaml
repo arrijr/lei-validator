@@ -1,6 +1,6 @@
 openapi: 3.0.0
 info:
-  title: LEI Validator Pro
+  title: LEI & KYB Validator Pro
   version: "1.0.0"
   description: >
     Validate Legal Entity Identifier (LEI) numbers against the official GLEIF database.
@@ -9,11 +9,14 @@ info:
     Required for MiFID II, EMIR, and KYB compliance workflows.
 
 servers:
-  - url: https://lei-validator.vercel.app/api/v1
+  - url: https://lei-validator.vercel.app
     description: Production
 
+security:
+  - RapidAPIKey: []
+
 paths:
-  /validate:
+  /api/v1/validate:
     post:
       summary: Validate a single LEI number
       description: >
@@ -127,7 +130,7 @@ paths:
                 error: "GLEIF database temporarily unavailable"
                 code: "SERVICE_UNAVAILABLE"
 
-  /validate/batch:
+  /api/v1/validate/batch:
     post:
       summary: Validate up to 50 LEI numbers at once
       description: >
@@ -209,7 +212,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
-  /lookup/{lei}:
+  /api/v1/lookup/{lei}:
     get:
       summary: Get full company data for an LEI
       description: >
@@ -293,10 +296,11 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
-  /health:
+  /api/v1/health:
     get:
       summary: Health check
       operationId: healthCheck
+      security: []
       responses:
         "200":
           description: Service status
@@ -315,6 +319,12 @@ paths:
                     format: date-time
 
 components:
+  securitySchemes:
+    RapidAPIKey:
+      type: apiKey
+      in: header
+      name: X-RapidAPI-Key
+
   schemas:
     ValidLeiResponse:
       type: object
