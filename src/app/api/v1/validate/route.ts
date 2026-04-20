@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { checkRateLimit } from "@/lib/ratelimit";
 import { cacheGet, cacheSet } from "@/lib/redis";
-import { normalizeLei, validateLeiFormat, fetchGleif, isActive, isExpiringSoon, NotFoundError, ServiceUnavailableError } from "@/lib/lei";
+import { normalizeLei, validateLeiFormat, fetchGleif, isActive, isExpiringSoon, NotFoundError } from "@/lib/lei";
 import { errorJson, rateLimitedResponse, withRateHeaders } from "@/lib/responses";
-import type { LeiResult, GleifRecord } from "@/lib/types";
+import { isCachedValid, type CachedLeiRecord, type LeiResult, type LeiLookupResponse, type InvalidLeiResponse } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -41,17 +41,33 @@ export async function POST(req: NextRequest) {
   }
 
   const cacheKey = `lei:${lei}`;
-  const cached = await cacheGet<LeiResult>(cacheKey);
+  const cached = await cacheGet<CachedLeiRecord>(cacheKey);
   if (cached) {
-    const payload: LeiResult = cached.valid ? { ...cached, cached: true } : cached;
+    let payload: LeiResult;
+    if (isCachedValid(cached)) {
+      payload = buildValidateResponse(cached, true);
+    } else {
+      payload = cached;
+    }
     const res = NextResponse.json(payload, { status: 200 });
     return withRateHeaders(res, rl, "HIT");
   }
 
   try {
-    const record: GleifRecord = await fetchGleif(lei);
+    const record = await fetchGleif(lei);
     const active = isActive(record.entity_status, record.registration_status);
     const expires_soon = isExpiringSoon(record.next_renewal_date);
+    const verified_at = new Date().toISOString();
+
+    const cacheEntry: LeiLookupResponse = {
+      ...record,
+      expires_soon,
+      source: "GLEIF",
+      cached: false,
+      verified_at,
+    };
+
+    await cacheSet(cacheKey, cacheEntry, VALID_TTL);
 
     const result: LeiResult = {
       valid: true,
@@ -66,15 +82,14 @@ export async function POST(req: NextRequest) {
       expires_soon,
       source: "GLEIF",
       cached: false,
-      verified_at: new Date().toISOString(),
+      verified_at,
     };
 
-    await cacheSet(cacheKey, result, VALID_TTL);
     const res = NextResponse.json(result, { status: 200 });
     return withRateHeaders(res, rl, "MISS");
   } catch (err) {
     if (err instanceof NotFoundError) {
-      const result: LeiResult = {
+      const result: InvalidLeiResponse = {
         valid: false,
         lei,
         error_code: "NOT_FOUND",
@@ -91,4 +106,22 @@ export async function POST(req: NextRequest) {
     );
     return withRateHeaders(res, rl, "MISS");
   }
+}
+
+function buildValidateResponse(r: LeiLookupResponse, cached: boolean): LeiResult {
+  return {
+    valid: true,
+    active: isActive(r.entity_status, r.registration_status),
+    lei: r.lei,
+    legal_name: r.legal_name,
+    country: r.country,
+    jurisdiction: r.jurisdiction,
+    entity_status: r.entity_status,
+    registration_status: r.registration_status,
+    next_renewal_date: r.next_renewal_date,
+    expires_soon: r.expires_soon,
+    source: "GLEIF",
+    cached,
+    verified_at: r.verified_at,
+  };
 }

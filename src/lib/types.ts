@@ -66,3 +66,10 @@ export interface LeiLookupResponse extends GleifRecord {
   cached: boolean;
   verified_at: string;
 }
+
+/** Union type stored in Redis cache — always full data so both /validate and /lookup can share one key */
+export type CachedLeiRecord = LeiLookupResponse | InvalidLeiResponse;
+
+export function isCachedValid(r: CachedLeiRecord): r is LeiLookupResponse {
+  return !("error_code" in r);
+}

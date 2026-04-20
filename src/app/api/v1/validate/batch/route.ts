@@ -3,7 +3,7 @@ import { checkRateLimit } from "@/lib/ratelimit";
 import { cacheGet, cacheSet } from "@/lib/redis";
 import { normalizeLei, validateLeiFormat, fetchGleif, isActive, isExpiringSoon, NotFoundError } from "@/lib/lei";
 import { errorJson, rateLimitedResponse, withRateHeaders } from "@/lib/responses";
-import { TIER_BATCH_LIMITS, type LeiResult, type GleifRecord } from "@/lib/types";
+import { isCachedValid, TIER_BATCH_LIMITS, type CachedLeiRecord, type LeiResult, type LeiLookupResponse, type InvalidLeiResponse } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -25,17 +25,44 @@ async function validateSingle(raw: string): Promise<LeiResult> {
   }
 
   const cacheKey = `lei:${lei}`;
-  const cached = await cacheGet<LeiResult>(cacheKey);
+  const cached = await cacheGet<CachedLeiRecord>(cacheKey);
   if (cached) {
-    return cached.valid ? { ...cached, cached: true } : cached;
+    if (isCachedValid(cached)) {
+      return {
+        valid: true,
+        active: isActive(cached.entity_status, cached.registration_status),
+        lei: cached.lei,
+        legal_name: cached.legal_name,
+        country: cached.country,
+        jurisdiction: cached.jurisdiction,
+        entity_status: cached.entity_status,
+        registration_status: cached.registration_status,
+        next_renewal_date: cached.next_renewal_date,
+        expires_soon: cached.expires_soon,
+        source: "GLEIF",
+        cached: true,
+        verified_at: cached.verified_at,
+      };
+    }
+    return cached;
   }
 
   try {
-    const record: GleifRecord = await fetchGleif(lei);
+    const record = await fetchGleif(lei);
     const active = isActive(record.entity_status, record.registration_status);
     const expires_soon = isExpiringSoon(record.next_renewal_date);
+    const verified_at = new Date().toISOString();
 
-    const result: LeiResult = {
+    const cacheEntry: LeiLookupResponse = {
+      ...record,
+      expires_soon,
+      source: "GLEIF",
+      cached: false,
+      verified_at,
+    };
+    await cacheSet(cacheKey, cacheEntry, VALID_TTL);
+
+    return {
       valid: true,
       active,
       lei: record.lei,
@@ -48,14 +75,11 @@ async function validateSingle(raw: string): Promise<LeiResult> {
       expires_soon,
       source: "GLEIF",
       cached: false,
-      verified_at: new Date().toISOString(),
+      verified_at,
     };
-
-    await cacheSet(cacheKey, result, VALID_TTL);
-    return result;
   } catch (err) {
     if (err instanceof NotFoundError) {
-      const result: LeiResult = {
+      const result: InvalidLeiResponse = {
         valid: false,
         lei,
         error_code: "NOT_FOUND",

@@ -3,12 +3,13 @@ import { checkRateLimit } from "@/lib/ratelimit";
 import { cacheGet, cacheSet } from "@/lib/redis";
 import { normalizeLei, validateLeiFormat, fetchGleif, isExpiringSoon, NotFoundError } from "@/lib/lei";
 import { errorJson, rateLimitedResponse, withRateHeaders } from "@/lib/responses";
-import type { LeiLookupResponse, LeiResult } from "@/lib/types";
+import { isCachedValid, type CachedLeiRecord, type LeiLookupResponse, type InvalidLeiResponse } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const VALID_TTL = 86400;
+const INVALID_TTL = 3600;
 
 export async function GET(
   req: NextRequest,
@@ -25,53 +26,45 @@ export async function GET(
   }
 
   const cacheKey = `lei:${lei}`;
-  const cached = await cacheGet<LeiResult>(cacheKey);
+  const cached = await cacheGet<CachedLeiRecord>(cacheKey);
   if (cached) {
-    if (!cached.valid) {
+    if (!isCachedValid(cached)) {
       const res = NextResponse.json(
         { error: "LEI not found in GLEIF database", code: "NOT_FOUND" },
         { status: 404 },
       );
       return withRateHeaders(res, rl, "HIT");
     }
-    const lookup = buildLookupFromValid(cached, true);
-    const res = NextResponse.json(lookup, { status: 200 });
+    const payload: LeiLookupResponse = { ...cached, cached: true };
+    const res = NextResponse.json(payload, { status: 200 });
     return withRateHeaders(res, rl, "HIT");
   }
 
   try {
     const record = await fetchGleif(lei);
     const expires_soon = isExpiringSoon(record.next_renewal_date);
+    const verified_at = new Date().toISOString();
 
-    const validateResult: LeiResult = {
-      valid: true,
-      active: record.entity_status === "ACTIVE" && record.registration_status === "ISSUED",
-      lei: record.lei,
-      legal_name: record.legal_name,
-      country: record.country,
-      jurisdiction: record.jurisdiction,
-      entity_status: record.entity_status,
-      registration_status: record.registration_status,
-      next_renewal_date: record.next_renewal_date,
-      expires_soon,
-      source: "GLEIF",
-      cached: false,
-      verified_at: new Date().toISOString(),
-    };
-    await cacheSet(cacheKey, validateResult, VALID_TTL);
-
-    const lookup: LeiLookupResponse = {
+    const cacheEntry: LeiLookupResponse = {
       ...record,
       expires_soon,
       source: "GLEIF",
       cached: false,
-      verified_at: validateResult.verified_at,
+      verified_at,
     };
+    await cacheSet(cacheKey, cacheEntry, VALID_TTL);
 
-    const res = NextResponse.json(lookup, { status: 200 });
+    const res = NextResponse.json(cacheEntry, { status: 200 });
     return withRateHeaders(res, rl, "MISS");
   } catch (err) {
     if (err instanceof NotFoundError) {
+      const notFound: InvalidLeiResponse = {
+        valid: false,
+        lei,
+        error_code: "NOT_FOUND",
+        error: "LEI not found in GLEIF database",
+      };
+      await cacheSet(cacheKey, notFound, INVALID_TTL);
       const res = NextResponse.json(
         { error: "LEI not found in GLEIF database", code: "NOT_FOUND" },
         { status: 404 },
@@ -84,24 +77,4 @@ export async function GET(
     );
     return withRateHeaders(res, rl, "MISS");
   }
-}
-
-function buildLookupFromValid(r: LeiResult, cached: boolean): LeiLookupResponse {
-  if (!r.valid) throw new Error("called with invalid result");
-  return {
-    lei: r.lei,
-    legal_name: r.legal_name,
-    country: r.country,
-    jurisdiction: r.jurisdiction,
-    legal_form: null,
-    entity_status: r.entity_status,
-    registration_status: r.registration_status,
-    next_renewal_date: r.next_renewal_date,
-    expires_soon: r.expires_soon,
-    legal_address: { street: null, city: null, region: null, postal_code: null, country: r.country },
-    headquarters_address: { street: null, city: null, region: null, postal_code: null, country: r.country },
-    source: "GLEIF",
-    cached,
-    verified_at: r.verified_at,
-  };
 }
