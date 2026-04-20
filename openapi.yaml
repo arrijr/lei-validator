@@ -1,0 +1,464 @@
+openapi: 3.0.0
+info:
+  title: LEI Validator Pro
+  version: "1.0.0"
+  description: >
+    Validate Legal Entity Identifier (LEI) numbers against the official GLEIF database.
+    Returns company name, country, entity status, and renewal date.
+    Supports single validation, batch processing, and full company data lookup.
+    Required for MiFID II, EMIR, and KYB compliance workflows.
+
+servers:
+  - url: https://lei-validator.vercel.app/api/v1
+    description: Production
+
+paths:
+  /validate:
+    post:
+      summary: Validate a single LEI number
+      description: >
+        Validates an LEI number against the GLEIF database.
+        Returns company name, entity status, and whether the LEI is active and current.
+        The expires_soon flag is set when the LEI renewal date is within 90 days.
+        Results are cached for 24h.
+      operationId: validateLei
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - lei
+              properties:
+                lei:
+                  type: string
+                  description: LEI number to validate (spaces ignored, auto-uppercased)
+                  example: "5493001KJTIIGC8Y1R12"
+      responses:
+        "200":
+          description: Validation result
+          headers:
+            X-RateLimit-Remaining:
+              schema:
+                type: integer
+            X-Cache:
+              schema:
+                type: string
+                enum: [HIT, MISS]
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ValidLeiResponse"
+                  - $ref: "#/components/schemas/InvalidLeiResponse"
+              examples:
+                valid_active:
+                  summary: Valid and active LEI
+                  value:
+                    valid: true
+                    active: true
+                    lei: "5493001KJTIIGC8Y1R12"
+                    legal_name: "Bloomberg Finance L.P."
+                    country: "US"
+                    jurisdiction: "US-DE"
+                    entity_status: "ACTIVE"
+                    registration_status: "ISSUED"
+                    next_renewal_date: "2027-01-25"
+                    expires_soon: false
+                    source: "GLEIF"
+                    cached: false
+                    verified_at: "2026-04-19T10:00:00Z"
+                valid_expiring:
+                  summary: Valid but expiring soon
+                  value:
+                    valid: true
+                    active: true
+                    lei: "2138003AKXNLBMND5W28"
+                    legal_name: "Example GmbH"
+                    country: "DE"
+                    jurisdiction: "DE"
+                    entity_status: "ACTIVE"
+                    registration_status: "ISSUED"
+                    next_renewal_date: "2026-06-01"
+                    expires_soon: true
+                    source: "GLEIF"
+                    cached: false
+                    verified_at: "2026-04-19T10:00:00Z"
+                invalid_not_found:
+                  summary: LEI not found
+                  value:
+                    valid: false
+                    lei: "00000000000000000000"
+                    error_code: "NOT_FOUND"
+                    error: "LEI not found in GLEIF database"
+                invalid_format:
+                  summary: Invalid format
+                  value:
+                    valid: false
+                    lei: "INVALID123"
+                    error_code: "INVALID_FORMAT"
+                    error: "LEI must be exactly 20 alphanumeric characters"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: GLEIF service unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: "GLEIF database temporarily unavailable"
+                code: "SERVICE_UNAVAILABLE"
+
+  /validate/batch:
+    post:
+      summary: Validate up to 50 LEI numbers at once
+      description: >
+        Validates a batch of LEI numbers against the GLEIF database.
+        Results are returned in the same order as the input.
+        Batch size limit depends on your subscription tier.
+      operationId: validateLeiBatch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - leis
+              properties:
+                leis:
+                  type: array
+                  items:
+                    type: string
+                  minItems: 1
+                  maxItems: 50
+                  description: List of LEI numbers to validate
+                  example:
+                    - "5493001KJTIIGC8Y1R12"
+                    - "2138003AKXNLBMND5W28"
+                    - "INVALID"
+      responses:
+        "200":
+          description: Batch validation results
+          headers:
+            X-RateLimit-Remaining:
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      oneOf:
+                        - $ref: "#/components/schemas/ValidLeiResponse"
+                        - $ref: "#/components/schemas/InvalidLeiResponse"
+                  total:
+                    type: integer
+                  valid_count:
+                    type: integer
+                  invalid_count:
+                    type: integer
+                  expiring_soon_count:
+                    type: integer
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Batch size exceeds tier limit
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: "Batch size 30 exceeds your plan limit of 10."
+                code: "BATCH_LIMIT_EXCEEDED"
+        "429":
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /lookup/{lei}:
+    get:
+      summary: Get full company data for an LEI
+      description: >
+        Returns complete company information from the GLEIF database for the given LEI,
+        including legal and headquarters addresses, legal form, and registration details.
+        Use this endpoint when you need full entity data rather than just a validity check.
+      operationId: lookupLei
+      parameters:
+        - name: lei
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "5493001KJTIIGC8Y1R12"
+          description: The 20-character LEI number to look up
+      responses:
+        "200":
+          description: Full company data
+          headers:
+            X-RateLimit-Remaining:
+              schema:
+                type: integer
+            X-Cache:
+              schema:
+                type: string
+                enum: [HIT, MISS]
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LeiLookupResponse"
+              example:
+                lei: "5493001KJTIIGC8Y1R12"
+                legal_name: "Bloomberg Finance L.P."
+                country: "US"
+                jurisdiction: "US-DE"
+                legal_form: "Limited Partnership"
+                entity_status: "ACTIVE"
+                registration_status: "ISSUED"
+                next_renewal_date: "2027-01-25"
+                expires_soon: false
+                legal_address:
+                  street: "251 Little Falls Drive"
+                  city: "Wilmington"
+                  region: "US-DE"
+                  postal_code: "19808"
+                  country: "US"
+                headquarters_address:
+                  street: "731 Lexington Avenue"
+                  city: "New York"
+                  region: "US-NY"
+                  postal_code: "10022"
+                  country: "US"
+                source: "GLEIF"
+                cached: false
+                verified_at: "2026-04-19T10:00:00Z"
+        "400":
+          description: Invalid LEI format
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: LEI not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: "LEI not found in GLEIF database"
+                code: "NOT_FOUND"
+        "429":
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /health:
+    get:
+      summary: Health check
+      operationId: healthCheck
+      responses:
+        "200":
+          description: Service status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+                  gleif_reachable:
+                    type: boolean
+                  timestamp:
+                    type: string
+                    format: date-time
+
+components:
+  schemas:
+    ValidLeiResponse:
+      type: object
+      properties:
+        valid:
+          type: boolean
+          example: true
+        active:
+          type: boolean
+          example: true
+        lei:
+          type: string
+          example: "5493001KJTIIGC8Y1R12"
+        legal_name:
+          type: string
+          example: "Bloomberg Finance L.P."
+        country:
+          type: string
+          example: "US"
+        jurisdiction:
+          type: string
+          example: "US-DE"
+        entity_status:
+          type: string
+          enum: [ACTIVE, INACTIVE, ANNULLED]
+          example: "ACTIVE"
+        registration_status:
+          type: string
+          enum: [ISSUED, LAPSED, MERGED, RETIRED, ANNULLED, DUPLICATE, TRANSFERRED, PENDING_TRANSFER, PENDING_ARCHIVAL]
+          example: "ISSUED"
+        next_renewal_date:
+          type: string
+          format: date
+          example: "2027-01-25"
+        expires_soon:
+          type: boolean
+          description: True if next_renewal_date is within 90 days
+          example: false
+        source:
+          type: string
+          example: "GLEIF"
+        cached:
+          type: boolean
+          example: false
+        verified_at:
+          type: string
+          format: date-time
+
+    InvalidLeiResponse:
+      type: object
+      properties:
+        valid:
+          type: boolean
+          example: false
+        lei:
+          type: string
+          example: "00000000000000000000"
+        error_code:
+          type: string
+          enum: [INVALID_FORMAT, NOT_FOUND, SERVICE_UNAVAILABLE]
+          example: "NOT_FOUND"
+        error:
+          type: string
+          example: "LEI not found in GLEIF database"
+
+    Address:
+      type: object
+      properties:
+        street:
+          type: string
+          nullable: true
+          example: "731 Lexington Avenue"
+        city:
+          type: string
+          nullable: true
+          example: "New York"
+        region:
+          type: string
+          nullable: true
+          example: "US-NY"
+        postal_code:
+          type: string
+          nullable: true
+          example: "10022"
+        country:
+          type: string
+          example: "US"
+
+    LeiLookupResponse:
+      type: object
+      properties:
+        lei:
+          type: string
+          example: "5493001KJTIIGC8Y1R12"
+        legal_name:
+          type: string
+          example: "Bloomberg Finance L.P."
+        country:
+          type: string
+          example: "US"
+        jurisdiction:
+          type: string
+          example: "US-DE"
+        legal_form:
+          type: string
+          nullable: true
+          example: "Limited Partnership"
+        entity_status:
+          type: string
+          enum: [ACTIVE, INACTIVE, ANNULLED]
+          example: "ACTIVE"
+        registration_status:
+          type: string
+          example: "ISSUED"
+        next_renewal_date:
+          type: string
+          format: date
+          example: "2027-01-25"
+        expires_soon:
+          type: boolean
+          example: false
+        legal_address:
+          $ref: "#/components/schemas/Address"
+        headquarters_address:
+          $ref: "#/components/schemas/Address"
+        source:
+          type: string
+          example: "GLEIF"
+        cached:
+          type: boolean
+          example: false
+        verified_at:
+          type: string
+          format: date-time
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+        - code
+      properties:
+        error:
+          type: string
+        code:
+          type: string
+        details:
+          type: object
